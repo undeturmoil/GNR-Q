@@ -1,0 +1,2 @@
+datasets==5.0.1
+torchao==0.18.0

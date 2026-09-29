@@ -1,0 +1,32 @@
+{
+  "model": "Qwen/Qwen3-4B-Base",
+  "bits": 4,
+  "group_size": 128,
+  "layer": 27,
+  "rank": 128,
+  "local_metrics": {
+    "mse_q": 13.600811712443829,
+    "mse_c": 13.581514485180378,
+    "cos_q": 0.9583716616034508,
+    "cos_c": 0.9590451121330261
+  },
+  "final_metrics": {
+    "mse_q": 0.7872238531708717,
+    "mse_c": 0.7696565464138985,
+    "cos_q": 0.9644041880965233,
+    "cos_c": 0.9651139229536057
+  },
+  "loss_teacher": 2.284281313419342,
+  "loss_quant": 2.4977295100688934,
+  "loss_corrected": 2.4922196567058563,
+  "gap_closure": 0.025813539067202466,
+  "torch_version": "2.13.0+cu130",
+  "cuda_version": "13.0",
+  "transformers_version": "5.17.0",
+  "datasets_version": "5.0.1",
+  "gpu": "NVIDIA GB10",
+  "reconstructor_params": 985600,
+  "peak_cuda_allocated_bytes": 16707514368,
+  "elapsed_sec": 138.81463634200009,
+  "model_commit": "906bfd4b4dc7f14ee4320094d8b41684abff8539"
+}

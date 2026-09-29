@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+title: "GNR-Q: Inference-Time State-Conditioned Reconstruction for Memory-Efficient Quantized Language Models"
+message: "If you use GNR-Q or build on this work, please cite the accompanying preprint."
+type: software
+
+authors:
+  - family-names: "Baeck"
+    given-names: "SeungGeun"
+    email: "undeturmoil@gmail.com"
+    affiliation: "Vhexlab Co., Ltd."
+
+  - family-names: "Pyo"
+    given-names: "Dumi"
+    email: "dumipyo@gmail.com"
+    affiliation: "Department of Psychology, Ajou University"
+
+  - family-names: "Suk"
+    given-names: "HaeJung"
+    email: "dbdip@ajou.ac.kr"
+    affiliation: "Department of Digital Media, Ajou University"
+
+repository-code: "https://github.com/undeturmoil/GNR-Q"
+license: "Apache-2.0"
