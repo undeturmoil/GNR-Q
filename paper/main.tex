@@ -41,7 +41,7 @@ HaeJung Suk\textsuperscript{3,*}\\[0.5em]
 \begin{abstract}
 Low-bit quantization substantially reduces the memory footprint of large language models (LLMs), but the associated loss of numerical precision can distort internal representations and degrade downstream prediction quality. We investigate whether part of this lost representation quality can be reconstructed dynamically at inference time rather than preserved explicitly in model weights. We introduce \textbf{GNR-Q} (Guided Neural Reconstruction for Quantization), an inference-time state-conditioned reconstruction framework in which a compact learned sidecar observes a hidden representation produced by a frozen quantized model and predicts a residual correction toward the corresponding full-precision representation.
 
-Using Qwen3-4B-Base, we first perform controlled differentiable W4A16 and W3A16 experiments to study reproducibility, layer placement, and reconstruction capacity. We then evaluate an actual TorchAO packed W4 model. Packing 252 decoder linear modules reduces measured resident model memory from 7.545 GiB in BF16 to 2.792 GiB, a 63.0\% reduction and a 2.70$\times$ compression ratio. A 0.986M-parameter GNR-Q sidecar requires only 1.88 MiB in BF16. When trained exclusively to reconstruct the BF16 hidden representation, with no next-token cross-entropy supervision, GNR-Q reduces final hidden-state MSE from 0.5376 to 0.3901 and improves perplexity from 15.000 to 14.415, recovering 27.52\% of the cross-entropy degradation introduced by quantization. A parameter-matched low-rank projection control recovers 26.51\%, suggesting that much of the predictable residual has compact state-dependent structure.
+Using Qwen3-4B-Base, we first perform controlled differentiable W4A16 and W3A16 experiments to study reproducibility, layer placement, and reconstruction capacity. We then evaluate an actual TorchAO packed W4 model. Packing 252 decoder linear modules reduces measured CUDA-allocated model memory from 7.545 GiB in BF16 to 2.792 GiB, a 63.0\% reduction and a 2.70$\times$ compression ratio. A 0.986M-parameter GNR-Q sidecar requires only 1.88 MiB in BF16. When trained exclusively to reconstruct the BF16 hidden representation, with no next-token cross-entropy supervision, GNR-Q reduces final hidden-state MSE from 0.5376 to 0.3901 and improves perplexity from 15.000 to 14.415, recovering 27.52\% of the cross-entropy degradation introduced by quantization. A parameter-matched low-rank projection control recovers 26.51\%, suggesting that much of the predictable residual has compact state-dependent structure.
 
 These results provide evidence that some representation fidelity removed by low-bit quantization can be replaced by lightweight inference-time computation, establishing a practical memory--compute trade-off for quantized LLM inference.
 \end{abstract}
@@ -74,7 +74,7 @@ The conceptual motivation is related to neural reconstruction strategies used in
 
 Recent mechanistic work supports the possibility that quantization error is structured. Chen et al. show that hidden-state errors in pretrained quantized LLMs do not simply accumulate independently through depth; newly introduced errors often partially oppose inherited errors, slowing error growth \cite{chen2026why}. This motivates viewing quantization error as part of a learned representation trajectory rather than as independent additive noise.
 
-Our experiments support four main findings. First, reconstruction is reproducible across random seeds and remains effective under more severe W3 quantization. Second, reconstruction quality depends systematically on insertion layer and sidecar capacity. Third, in a real packed W4 model, a 1.88 MiB sidecar recovers 27.52\% of the quantization-induced cross-entropy gap while preserving approximately 63\% lower resident model memory than BF16. Fourth, a parameter-matched low-rank projection control recovers almost the same amount, suggesting that much of the recoverable residual has compact state-predictable structure.
+Our experiments support four main findings. First, reconstruction is reproducible across random seeds and remains effective under more severe W3 quantization. Second, reconstruction quality depends systematically on insertion layer and sidecar capacity. Third, in a real packed W4 model, a 1.88 MiB sidecar recovers 27.52\% of the quantization-induced cross-entropy gap while preserving approximately 63\% lower CUDA-allocated model memory than BF16. Fourth, a parameter-matched low-rank projection control recovers almost the same amount, suggesting that much of the recoverable residual has compact state-predictable structure.
 
 The purpose of this paper is therefore not to introduce a universally superior quantizer. Instead, we validate a distinct inference-time reconstruction formulation in which a frozen low-bit model exposes enough structure in its current hidden state for a compact learned sidecar to estimate part of the unavailable full-precision representation.
 
@@ -222,7 +222,7 @@ exactly matching the rank-128 GNR-Q sidecar. Because RMSNorm is present, we refe
 
 \subsection{Memory Accounting}
 
-Let $M_{\mathrm{FP}}$ be BF16 model memory, $M_Q$ packed quantized model memory, and $M_R$ sidecar memory. Deployment memory is
+Let $M_{\mathrm{FP}}$ be BF16 model memory, $M_Q$ packed quantized model memory, and $M_R$ sidecar memory. For the actual packed comparison, model memory refers to the PyTorch CUDA allocation reported by \texttt{torch.cuda.memory\_allocated()} after model construction or quantization; it is not a measurement of total physical or system-wide unified memory. Deployment memory is
 \begin{equation}
  M_{\mathrm{deploy}} = M_Q + M_R,
 \end{equation}
@@ -370,14 +370,14 @@ Recovery improves steadily through rank 128 but largely saturates in downstream 
 
 \subsection{Actual Packed W4 Memory and Quality}
 
-The central deployment experiment uses actual packed INT4 weights. Measured resident model memory falls from 7.545 GiB in BF16 to 2.792 GiB in packed W4, a 63.00\% reduction and 2.70$\times$ compression. The BF16 GNR-Q sidecar uses only 1.880 MiB, yielding a combined footprint of approximately 2.794 GiB and preserving approximately 62.97\% lower resident model memory than BF16.
+The central deployment experiment uses actual packed INT4 weights. Measured CUDA-allocated model memory falls from 7.545 GiB in BF16 to 2.792 GiB in packed W4, a 63.00\% reduction and 2.70$\times$ compression. The BF16 GNR-Q sidecar uses only 1.880 MiB, yielding a combined footprint of approximately 2.794 GiB and preserving approximately 62.97\% lower CUDA-allocated model memory than BF16.
 
 \begin{table}[t]
 \centering
 \small
 \begin{tabular}{lrrrrrr}
 \toprule
-Configuration & Memory & Sidecar & Loss & PPL & Hidden MSE & Gap closure \\
+Configuration & CUDA alloc. & Sidecar & Loss & PPL & Hidden MSE & Gap closure \\
 \midrule
 BF16 & 7.545 GiB & -- & 2.56338 & 12.980 & -- & -- \\
 Packed W4 & 2.792 GiB & -- & 2.70808 & 15.000 & 0.53760 & 0.00\% \\
@@ -443,7 +443,7 @@ These observations suggest that hidden-state error contains directions with very
 
 \subsection{A Practical Memory--Compute Trade-Off}
 
-Packed W4 removes approximately 4.753 GiB of measured model memory relative to BF16, while the deployed sidecar reintroduces only 1.880 MiB. The saved-memory-to-sidecar-storage ratio is therefore approximately 2,589:1. This makes the parameter-memory side of the trade-off strongly favorable.
+Packed W4 removes approximately 4.753 GiB of measured CUDA-allocated model memory relative to BF16, while the deployed sidecar reintroduces only 1.880 MiB. The saved-memory-to-sidecar-storage ratio is therefore approximately 2,589:1. This makes the parameter-memory side of the trade-off strongly favorable.
 
 However, memory is only one deployment resource. The present study does not measure end-to-end latency, decoding throughput, prefill throughput, or energy. Approximately one million additional low-rank multiply-accumulate operations per token is small relative to a 4B-parameter backbone, but kernel-launch and memory-movement overhead can dominate small modules. We therefore claim a demonstrated memory--additional-compute design space, not yet a proven latency advantage.
 
@@ -500,7 +500,7 @@ subject to memory and reconstruction-compute budgets. Such a formulation treats 
 
 We investigated whether representation quality lost through low-bit language-model quantization can be partially reconstructed at inference time rather than preserved entirely as stored numerical precision. GNR-Q uses a compact state-conditioned sidecar to estimate a residual toward the corresponding full-precision hidden state while leaving the quantized backbone frozen.
 
-Across simulated W4 and W3 experiments, reconstruction consistently reduces representation error and improves language-model quality. In an actual packed INT4 Qwen3-4B-Base model, resident model memory falls from 7.545 GiB to 2.792 GiB. A 1.88 MiB BF16 sidecar trained only on hidden-state reconstruction reduces final hidden-state MSE by 27.44\% and recovers 27.52\% of the quantization-induced cross-entropy degradation. A parameter-matched low-rank projection control recovers 26.51\%, suggesting that much of the recoverable residual has compact state-dependent structure.
+Across simulated W4 and W3 experiments, reconstruction consistently reduces representation error and improves language-model quality. In an actual packed INT4 Qwen3-4B-Base model, CUDA-allocated model memory falls from 7.545 GiB to 2.792 GiB. A 1.88 MiB BF16 sidecar trained only on hidden-state reconstruction reduces final hidden-state MSE by 27.44\% and recovers 27.52\% of the quantization-induced cross-entropy degradation. A parameter-matched low-rank projection control recovers 26.51\%, suggesting that much of the recoverable residual has compact state-dependent structure.
 
 The strongest conclusion supported by the present experiments is deliberately narrow: a substantial component of quantization-induced representation degradation is statistically predictable from the surviving quantized hidden state and can be reconstructed by a very small learned sidecar while preserving nearly all of the memory savings of low-bit inference. This establishes a complementary design axis for quantized language models in which stored precision and runtime reconstruction capacity can be allocated jointly.
 
