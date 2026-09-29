@@ -187,12 +187,20 @@ Authors:
 - Dumi Pyo — Department of Psychology, Ajou University
 - HaeJung Suk — Department of Digital Media, Ajou University (corresponding author)
 
-Planned arXiv classification:
+### Preprint
+
+Zenodo v1.0:
+
+- DOI: https://doi.org/10.5281/zenodo.23044424
+
+### Repository
+
+- https://github.com/undeturmoil/GNR-Q
+
+### Planned arXiv classification
 
 - Primary: `cs.LG`
 - Cross-list: `cs.CL`
-
-Repository: https://github.com/undeturmoil/GNR-Q
 
 ## License
 
