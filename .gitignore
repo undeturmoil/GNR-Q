@@ -227,14 +227,3 @@ paper/*.log
 paper/*.out
 paper/*.toc
 paper/*.synctex.gz
-
-# GNR-Q generated artifacts
-*.pt
-results/reproduced/
-
-# LaTeX build artifacts
-paper/*.aux
-paper/*.log
-paper/*.out
-paper/*.toc
-paper/*.synctex.gz
