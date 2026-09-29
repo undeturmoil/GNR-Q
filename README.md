@@ -206,4 +206,4 @@ Zenodo v1.0:
 
 Source code in this repository is released under the **Apache License 2.0**.
 
-The accompanying manuscript is planned for distribution under **CC BY 4.0**.
+The accompanying manuscript is distributed under **CC BY 4.0** via Zenodo.
