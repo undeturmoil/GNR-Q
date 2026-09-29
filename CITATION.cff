@@ -21,3 +21,17 @@ authors:
 
 repository-code: "https://github.com/undeturmoil/GNR-Q"
 license: "Apache-2.0"
+
+preferred-citation:
+  type: article
+  title: "GNR-Q: Inference-Time State-Conditioned Reconstruction for Memory-Efficient Quantized Language Models"
+  authors:
+    - family-names: "Baeck"
+      given-names: "SeungGeun"
+    - family-names: "Pyo"
+      given-names: "Dumi"
+    - family-names: "Suk"
+      given-names: "HaeJung"
+  year: 2026
+  doi: "10.5281/zenodo.23044424"
+  url: "https://doi.org/10.5281/zenodo.23044424"
