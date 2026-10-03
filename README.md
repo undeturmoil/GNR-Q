@@ -255,9 +255,9 @@ Authors:
 
 ### Preprint
 
-Current Zenodo record (v1.0, to be superseded by the revised version):
+Zenodo v2.0:
 
-- DOI: https://doi.org/10.5281/zenodo.23044424
+- DOI: https://doi.org/10.5281/zenodo.23113127
 
 ### Repository
 
