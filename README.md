@@ -8,27 +8,27 @@ The full-precision teacher is used only during offline reconstruction training. 
 
 ## Core formulation
 
-For a full-precision hidden state $h^{FP}$ and its quantized counterpart $h^Q$, define the representation residual as
+For a full-precision hidden state \(h^{FP}\) and its quantized counterpart \(h^Q\), define
 
-$$
+\[
 e = h^{FP} - h^Q.
-$$
+\]
 
-GNR-Q learns a compact reconstructor
+GNR-Q learns
 
-$$
+\[
 \hat e = R_\theta(h^Q)
-$$
+\]
 
 and applies
 
-$$
+\[
 \hat h = h^Q + \hat e.
-$$
+\]
 
-The working hypothesis is that a useful component of quantization-induced representation error is statistically predictable from the surviving quantized state.
+The central hypothesis is deliberately narrow: a useful component of quantization-induced representation error is statistically predictable from the surviving quantized state.
 
-## Main packed-W4 result
+## Primary packed-W4 result
 
 Model: `Qwen/Qwen3-4B-Base`
 
@@ -39,13 +39,67 @@ Model: `Qwen/Qwen3-4B-Base`
 | Packed W4 + GNR-Q | ~2.794 GiB | 1.880 MiB | 2.66825 | 14.415 | 27.52% |
 | Packed W4 + low-rank control | ~2.794 GiB | 1.880 MiB | 2.66972 | 14.436 | 26.51% |
 
-The primary packed-W4 GNR-Q sidecar is trained with **representation reconstruction only** (`CE_WEIGHT = 0.0`). No next-token cross-entropy supervision is used in this primary result.
+The primary packed-W4 GNR-Q sidecar is trained with **representation reconstruction only** (`CE_WEIGHT = 0.0`). No next-token cross-entropy supervision is used.
 
 Final hidden-state MSE decreases from `0.53760` to `0.39009`, a reduction of approximately **27.44%**.
 
 The combined packed-W4 model plus BF16 sidecar retains approximately **62.97% lower CUDA-allocated model memory** than the BF16 model allocation.
 
-## Diagnostic experiments
+## Final validation and controls
+
+A separate matched packed-W4 run reproduces the reconstruction effect and adds state-dependence controls, cross-corpus transfer, spectral analysis, and runtime measurement.
+
+### State-dependence controls
+
+| Condition | Loss | PPL | Hidden MSE | CE-gap closure |
+|---|---:|---:|---:|---:|
+| BF16 | 2.56338 | 12.980 | - | - |
+| Packed W4 | 2.70808 | 15.000 | 0.53760 | 0% |
+| Mean residual | 2.68484 | 14.656 | 0.47255 | 16.06% |
+| Shuffled residual | 2.68678 | 14.684 | 0.47240 | 14.72% |
+| Correctly paired GNR-Q | 2.66768 | 14.407 | 0.38863 | 27.92% |
+
+The mean-residual control applies one global correction vector to every state. The shuffled-residual control retains the GNR-Q architecture but breaks the intended state-residual correspondence during training.
+
+Correct pairing therefore adds **11.86 percentage points** of CE-gap recovery over the global-mean control and **13.20 percentage points** over the shuffled-residual control.
+
+### Cross-corpus transfer
+
+The sidecar is trained only on WikiText-2 and evaluated on 8,192 C4 validation tokens **without retraining**.
+
+| C4 condition | Loss | PPL | Hidden MSE | CE-gap closure |
+|---|---:|---:|---:|---:|
+| BF16 | 3.15675 | 23.494 | - | - |
+| Packed W4 | 3.24364 | 25.627 | 0.29456 | 0% |
+| W4 + WikiText-trained GNR-Q | 3.21265 | 24.845 | 0.16702 | 35.67% |
+
+Hidden-state MSE is reduced by **43.30%** on the C4 evaluation blocks.
+
+### Residual spectrum
+
+Spectral statistics are computed over 8,192 WikiText-2 validation token states.
+
+| Matrix | Top-8 energy | Top-32 | Top-128 | Entropy effective rank | Participation ratio |
+|---|---:|---:|---:|---:|---:|
+| Target residual | 28.41% | 38.64% | 52.79% | 453.39 | 45.57 |
+| Predicted correction | 87.76% | 99.50% | ~100% | 7.22 | 3.59 |
+| Unexplained residual | 17.81% | 27.43% | 43.17% | 777.81 | 128.98 |
+
+The predicted correction is produced through a rank-128 bottleneck, so its absolute rank is architecture constrained. The useful observation is that the captured correction is highly concentrated within that subspace, while the residual remaining after correction is substantially more diffuse.
+
+### Runtime microbenchmark
+
+Batch size 1 on NVIDIA GB10:
+
+| Path | Packed W4 | W4 + GNR-Q |
+|---|---:|---:|
+| 128-token prefill | 861.46 tok/s | 861.47 tok/s |
+| Cached decode | 47.39 tok/s | 47.44 tok/s |
+| Decode latency | 21.102 ms/token | 21.077 ms/token |
+
+The nominal decode difference in the idle rerun is `-0.12%`. This is treated as measurement noise rather than a speedup: no resolvable GNR-Q throughput penalty was observed in this specific batch-1 microbenchmark.
+
+## Diagnostic simulated experiments
 
 ### Seed reproducibility
 
@@ -85,11 +139,13 @@ GNR-Q/
 ├── Dockerfile
 ├── requirements.txt
 ├── CITATION.cff
+├── run_gnrq_v5_final.sh
 ├── src/
 │   ├── gnrq_poc_spark.py
 │   ├── gnrq_packed_pure.py
 │   ├── gnrq_linear_control.py
-│   └── gnrq_packed_task_aware.py
+│   ├── gnrq_packed_task_aware.py
+│   └── gnrq_v5_final_validation.py
 ├── experiments/
 │   ├── run_w4_seeds.sh
 │   ├── run_w3_seeds.sh
@@ -100,7 +156,11 @@ GNR-Q/
 │   └── run_task_aware.sh
 ├── results/
 │   └── raw/
+│       └── v5_final_validation_final.json
 └── paper/
+    ├── main.tex
+    ├── GNR-Q_preprint.pdf
+    └── README.md
 ```
 
 ## Environment
@@ -150,32 +210,38 @@ bash experiments/run_layer_ablation.sh
 bash experiments/run_rank_ablation.sh
 ```
 
-The simulated experiments explicitly use 3 local reconstruction epochs, followed by 1 frozen-suffix end-to-end refinement epoch. With the reported base learning rate of `3e-4`, the end-to-end refinement code uses `0.3 × lr = 9e-5`.
+The final matched validation can be launched directly from the repository root on the DGX Spark host:
 
-Training batch size is 4; evaluation batch size is 2 in the reported configuration.
+```bash
+./run_gnrq_v5_final.sh
+```
+
+The runner starts the `gnrq:paper` container and executes `src/gnrq_v5_final_validation.py`.
 
 ## Model and data
 
-The repository does not redistribute model weights or WikiText-2.
+The repository does not redistribute model weights, WikiText-2, or C4.
 
 The scripts obtain:
 
 - Model: `Qwen/Qwen3-4B-Base`
-- Dataset: `Salesforce/wikitext`
-- Dataset configuration: `wikitext-2-raw-v1`
+- Primary dataset: `Salesforce/wikitext`, `wikitext-2-raw-v1`
+- Cross-corpus evaluation: English C4 validation stream
 - Sequence length: 128
 - Training blocks: 256
-- Evaluation blocks: 64
+- WikiText evaluation blocks: 64
+- C4 evaluation blocks: 64
 
 ## Raw results
 
-Original machine-readable JSON outputs used to prepare the paper are preserved under `results/raw/`.
+Machine-readable JSON outputs used to prepare the paper are preserved under `results/raw/`.
 
-`packed_w4_gnrq_pure.json` is the primary pure-reconstruction packed-W4 result.
+Key files:
 
-`packed_w4_linear_control.json` is the parameter-matched low-rank projection control.
-
-`packed_w4_gnrq_final.json` is retained under its historical filename for provenance; it corresponds to the **task-aware auxiliary experiment** with `CE_WEIGHT = 0.25`, not the primary reconstruction-only result.
+- `packed_w4_gnrq_pure.json` — primary pure-reconstruction packed-W4 result.
+- `packed_w4_linear_control.json` — parameter-matched low-rank projection control.
+- `v5_final_validation_final.json` — matched state-dependence controls, C4 transfer, residual spectrum, and batch-1 runtime.
+- `packed_w4_gnrq_final.json` — historical filename for the **task-aware auxiliary experiment** with `CE_WEIGHT = 0.25`; it is not the primary reconstruction-only result.
 
 ## Paper
 
@@ -189,18 +255,13 @@ Authors:
 
 ### Preprint
 
-Zenodo v1.0:
+Current Zenodo record (v1.0, to be superseded by the revised version):
 
 - DOI: https://doi.org/10.5281/zenodo.23044424
 
 ### Repository
 
 - https://github.com/undeturmoil/GNR-Q
-
-### Planned arXiv classification
-
-- Primary: `cs.LG`
-- Cross-list: `cs.CL`
 
 ## License
 

@@ -33,36 +33,36 @@ HaeJung Suk\textsuperscript{3,*}\\[0.5em]
 \texttt{dbdip@ajou.ac.kr} \\
 \small \textsuperscript{*}Corresponding author
 }
-\date{September 2026}
+\date{October 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Low-bit quantization substantially reduces the memory footprint of large language models (LLMs), but the associated loss of numerical precision can distort internal representations and degrade downstream prediction quality. We investigate whether part of this lost representation quality can be reconstructed dynamically at inference time rather than preserved explicitly in model weights. We introduce \textbf{GNR-Q} (Guided Neural Reconstruction for Quantization), an inference-time state-conditioned reconstruction framework in which a compact learned sidecar observes a hidden representation produced by a frozen quantized model and predicts a residual correction toward the corresponding full-precision representation.
+Low-bit quantization reduces the memory footprint of large language models (LLMs), but the accompanying loss of numerical precision perturbs internal representations and can degrade next-token prediction. We ask whether part of this lost representation fidelity can be reconstructed at inference time from the quantized model's surviving hidden state. We introduce \textbf{GNR-Q} (Guided Neural Reconstruction for Quantization), a compact state-conditioned sidecar trained offline to predict the residual between quantized and full-precision hidden representations while leaving the quantized backbone frozen.
 
-Using Qwen3-4B-Base, we first perform controlled differentiable W4A16 and W3A16 experiments to study reproducibility, layer placement, and reconstruction capacity. We then evaluate an actual TorchAO packed W4 model. Packing 252 decoder linear modules reduces measured CUDA-allocated model memory from 7.545 GiB in BF16 to 2.792 GiB, a 63.0\% reduction and a 2.70$\times$ compression ratio. A 0.986M-parameter GNR-Q sidecar requires only 1.88 MiB in BF16. When trained exclusively to reconstruct the BF16 hidden representation, with no next-token cross-entropy supervision, GNR-Q reduces final hidden-state MSE from 0.5376 to 0.3901 and improves perplexity from 15.000 to 14.415, recovering 27.52\% of the cross-entropy degradation introduced by quantization. A parameter-matched low-rank projection control recovers 26.51\%, suggesting that much of the predictable residual has compact state-dependent structure.
+Using Qwen3-4B-Base, we first study reproducibility, insertion layer, and reconstructor capacity under simulated W4A16 and W3A16 quantization, then evaluate an actual TorchAO packed W4 model. Packing 252 decoder linear modules reduces measured CUDA-allocated model memory from 7.545 GiB in BF16 to 2.792 GiB, a 63.0\% reduction and a 2.70$\times$ compression ratio. A 0.986M-parameter GNR-Q sidecar requires 1.88 MiB in BF16. In the primary packed experiment, reconstruction-only training reduces final hidden-state MSE from 0.5376 to 0.3901 and improves perplexity from 15.000 to 14.415, recovering 27.52\% of the quantization-induced cross-entropy gap without next-token supervision. An independent matched run recovers 27.92\%. In that run, a global mean-residual correction and a shuffled state--residual control recover only 16.06\% and 14.72\%, respectively, indicating that correct state--residual correspondence contributes substantially beyond state-independent correction. The WikiText-trained sidecar transfers without retraining to C4 validation text and recovers 35.67\% of the C4 cross-entropy gap. Spectral analysis further shows that the learned correction is highly concentrated while the residual left after correction is more diffuse. In batch-1 microbenchmarks, packed W4 and packed W4 plus GNR-Q have indistinguishable prefill and decode throughput at the resolution of the measurement.
 
-These results provide evidence that some representation fidelity removed by low-bit quantization can be replaced by lightweight inference-time computation, establishing a practical memory--compute trade-off for quantized LLM inference.
+The evidence supports a narrow conclusion: part of the representation error introduced by low-bit quantization is predictable from the surviving quantized state and can be reconstructed by a very small runtime module while retaining nearly all of the memory savings of packed W4 inference.
 \end{abstract}
 
 \section{Introduction}
 
-Large language models increasingly face deployment constraints determined not only by computational throughput but also by memory capacity and memory bandwidth. Low-bit quantization addresses these constraints by representing model parameters with fewer bits, enabling substantially larger models to execute within a fixed device-memory budget. Modern post-training quantization (PTQ) methods have demonstrated that transformer weights can often be reduced to 4-bit and, in some settings, 3-bit or lower precision while retaining much of the original capability \cite{frantar2022gptq,lin2024awq}. Nevertheless, quantization is not lossless. Replacing full-precision parameters with low-bit approximations alters the transformations performed throughout the network, producing deviations in hidden representations and ultimately in next-token probabilities.
+Large language models increasingly face deployment constraints determined not only by computational throughput but also by memory capacity and memory bandwidth. Low-bit quantization addresses these constraints by representing model parameters with fewer bits, enabling substantially larger models to execute within a fixed device-memory budget. Modern post-training quantization (PTQ) methods have demonstrated that transformer weights can often be reduced to 4-bit and, in some settings, 3-bit or lower precision while retaining much of the original capability \cite{frantar2022gptq,lin2024awq}. Quantization is nevertheless not lossless. Replacing full-precision parameters with low-bit approximations changes the transformations performed throughout the network, producing deviations in hidden representations and ultimately in next-token probabilities.
 
-Most existing methods mitigate this degradation by improving the quantizer itself, preserving important channels, calibrating layer-wise error, or storing additional low-rank correction parameters \cite{zhang2024lqer,zhang2025qera,zhao2025aser,arai2025qep}. This paper studies a complementary possibility: \emph{can some of the representation fidelity removed by quantization be reconstructed only when inference is performed?}
+Most existing methods mitigate this degradation by improving the quantizer itself, preserving important channels, calibrating layer-wise error, or storing additional low-rank correction parameters \cite{zhang2024lqer,zhang2025qera,zhao2025aser,arai2025qep}. This paper studies a complementary possibility: \emph{can some representation fidelity removed by quantization be reconstructed only when inference is performed?}
 
 Let $\hfp_t$ denote a full-precision hidden representation and $\hq_t$ the corresponding representation produced by a quantized copy of the same pretrained model. Quantization induces the representation residual
 \begin{equation}
  e_t = \hfp_t - \hq_t.
 \end{equation}
-Instead of treating $e_t$ only as damage to be prevented before deployment, we ask whether a compact learned function can estimate part of this unavailable residual from the quantized state itself:
+Rather than treating $e_t$ only as damage to be prevented before deployment, we ask whether a compact learned function can estimate part of this unavailable residual from the quantized state:
 \begin{equation}
  \hat e_t = R_\theta(\hq_t),
  \qquad
  \hat h_t = \hq_t + \hat e_t.
 \end{equation}
-We call this framework \gnrq{}. The full-precision model is used only as an offline teacher. During deployment, the teacher and the true residual are absent; the sidecar must estimate the missing counterfactual full-precision state from the surviving quantized representation.
+We call this framework \gnrq{}. The full-precision model is used only as an offline teacher. During deployment, the teacher and true residual are absent; the sidecar estimates a counterfactual full-precision state from the representation that survives quantization.
 
 This formulation introduces a memory--compute trade-off:
 \begin{equation}
@@ -70,13 +70,13 @@ This formulation introduces a memory--compute trade-off:
  \;\longrightarrow\;
  \text{low-bit backbone} + \text{lightweight reconstruction compute}.
 \end{equation}
-The conceptual motivation is related to neural reconstruction strategies used in other computational domains: instead of explicitly retaining every high-fidelity detail, a lower-cost representation is supplemented by learned inference. Our claim is not that quantization can be exactly inverted, nor that discarded bits remain literally encoded in the quantized model. Rather, we test whether the surviving state contains sufficient statistical structure to estimate a useful component of the full-precision counterfactual.
+The claim is not that quantization can be exactly inverted or that discarded bits remain literally encoded in the low-bit model. The empirical question is narrower: whether the surviving hidden state contains statistical structure that predicts a useful component of the full-precision counterfactual.
 
-Recent mechanistic work supports the possibility that quantization error is structured. Chen et al. show that hidden-state errors in pretrained quantized LLMs do not simply accumulate independently through depth; newly introduced errors often partially oppose inherited errors, slowing error growth \cite{chen2026why}. This motivates viewing quantization error as part of a learned representation trajectory rather than as independent additive noise.
+Recent mechanistic work supports the broader possibility that quantization error is structured. Chen et al.\ show that hidden-state errors in pretrained quantized LLMs need not accumulate independently through depth; newly introduced errors may partially oppose inherited errors, slowing error growth \cite{chen2026why}. Other reconstruction-based PTQ work demonstrates that low-dimensional correction spaces can recover substantial quality \cite{zhang2024lqer,zhang2025qera,zhao2025aser,an2026glowq,fan2026balancer}. These findings motivate treating quantization error as structured representation drift rather than independent additive noise.
 
-Our experiments support four main findings. First, reconstruction is reproducible across random seeds and remains effective under more severe W3 quantization. Second, reconstruction quality depends systematically on insertion layer and sidecar capacity. Third, in a real packed W4 model, a 1.88 MiB sidecar recovers 27.52\% of the quantization-induced cross-entropy gap while preserving approximately 63\% lower CUDA-allocated model memory than BF16. Fourth, a parameter-matched low-rank projection control recovers almost the same amount, suggesting that much of the recoverable residual has compact state-predictable structure.
+The experiments proceed in three stages. Controlled simulated W4A16 and W3A16 experiments establish reproducibility and characterize the effects of insertion layer and reconstructor rank. A real packed-W4 experiment then verifies the memory reduction and downstream recovery using an inference-only INT4 backbone. Finally, matched controls, cross-corpus transfer, residual-spectrum analysis, and runtime microbenchmarks test alternative explanations for the packed-model result. The primary packed experiment recovers 27.52\% of the quantization-induced cross-entropy gap with a 1.88 MiB sidecar. A separate matched run recovers 27.92\%, whereas mean-residual and shuffled-residual controls recover 16.06\% and 14.72\%. The same WikiText-trained sidecar recovers 35.67\% of the gap on held-out C4 text without retraining.
 
-The purpose of this paper is therefore not to introduce a universally superior quantizer. Instead, we validate a distinct inference-time reconstruction formulation in which a frozen low-bit model exposes enough structure in its current hidden state for a compact learned sidecar to estimate part of the unavailable full-precision representation.
+The contribution is therefore not a claim of a universally superior quantizer or a new adapter architecture. The contribution is a deployment formulation and an empirical result: a frozen low-bit language model can expose enough information in its runtime hidden state for a compact learned function to reconstruct part of an unavailable full-precision representation.
 
 \section{Related Work}
 
@@ -88,21 +88,25 @@ These methods primarily seek a better low-bit parameterization. \gnrq{} instead 
 
 \subsection{Static Low-Rank Quantization-Error Correction}
 
-A closely related line of research augments quantized models with low-rank correction terms. LQER uses low-rank approximation together with activation-induced scaling to reconstruct quantization error \cite{zhang2024lqer}. QERA derives analytical low-rank reconstruction terms by minimizing expected output error rather than only raw weight error \cite{zhang2025qera}. ASER combines low-rank error reconstruction with activation smoothing \cite{zhao2025aser}. More recent approaches such as GlowQ and BALANCER focus on reducing the memory and latency overhead of low-rank correction or distributing correction capacity under explicit budgets \cite{an2026glowq,fan2026balancer}. SandwichQuant identifies an efficient normalization-affine correction subspace before and after quantization \cite{xia2026sandwich}.
+A closely related line of research augments quantized models with low-rank correction terms. LQER uses low-rank approximation together with activation-induced scaling to reconstruct quantization error \cite{zhang2024lqer}. QERA derives analytical low-rank reconstruction terms by minimizing expected output error rather than only raw weight error \cite{zhang2025qera}. ASER combines low-rank error reconstruction with activation smoothing \cite{zhao2025aser}. GlowQ and BALANCER focus on reducing low-rank correction overhead or distributing correction capacity under explicit budgets \cite{an2026glowq,fan2026balancer}. SandwichQuant identifies an efficient normalization-affine correction subspace before and after quantization \cite{xia2026sandwich}. Structured Residual Reconstruction allocates a limited rank budget between preserved weight subspaces and quantization-error reconstruction \cite{cho2026srr}.
 
-These methods establish that quantization error often has exploitable low-dimensional structure. The principal difference is where the correction is represented. Static correction methods attach learned or analytically derived parameters to weight-space or layer-space transformations. In \gnrq{}, the auxiliary parameters define a \emph{function} that generates a residual correction from the current runtime hidden state. The correction itself is not stored per token or per inference state.
+These methods establish that quantization error often has exploitable low-dimensional structure. The principal difference is where the correction is represented. Static correction methods attach learned or analytically derived parameters to weight-space or layer-space transformations. In \gnrq{}, auxiliary parameters define a function that emits a correction conditional on the current hidden state. The correction itself is generated at inference time rather than stored as a fixed residual for a specific token state.
 
 \subsection{Activation- and Representation-Space Correction}
 
-Low-Rank Correction (LRC) introduces full-precision low-rank matrices acting on available unquantized activations to compensate for joint weight-and-activation quantization error \cite{scetbon2024lrc}. IMPACT similarly emphasizes that activations may exhibit stronger low-rank structure than model weights and derives importance-aware reconstruction bases in activation space \cite{chowdhury2026impact}.
+Low-Rank Correction (LRC) introduces full-precision low-rank matrices acting on available unquantized activations to compensate for joint weight-and-activation quantization error \cite{scetbon2024lrc}. IMPACT similarly emphasizes low-rank structure in activation space and derives importance-aware reconstruction bases \cite{chowdhury2026impact}.
 
-Residual Fallback Quantization (RFQ) is a particularly close conceptual neighbor. RFQ explicitly computes the residual $r=x-Q(x)$ because the original activation $x$ is available immediately before activation quantization, and it preserves that residual through an auxiliary low-bit pathway \cite{rahman2026rfq}. \gnrq{} addresses a different condition: at deployment, the corresponding full-precision hidden state is unavailable. The sidecar must therefore predict an unavailable counterfactual residual from $h^Q$ alone. RFQ encodes an available residual; \gnrq{} estimates a missing one.
+Residual Fallback Quantization (RFQ) is a particularly close conceptual neighbor. RFQ explicitly computes the residual $r=x-Q(x)$ because the original activation $x$ is available immediately before activation quantization, then preserves that residual through an auxiliary low-bit pathway \cite{rahman2026rfq}. \gnrq{} addresses a different condition: at deployment, the corresponding full-precision hidden state is unavailable. The sidecar must predict the missing residual from $h^Q$ alone. RFQ encodes an available residual; \gnrq{} estimates an unavailable counterfactual residual.
 
-\subsection{Error Propagation and Representation Drift}
+Activation-Weighted Seeded Residual Coding (AWSRC) repairs low-bit weights using compact coded weight residuals selected using activation statistics \cite{liu2026awsrc}. That approach further illustrates the usefulness of compact residual side information, but the repaired quantity is again a stored weight-space residual rather than a token-dependent hidden-state correction.
 
-Quantization Error Propagation (QEP) explicitly models accumulation of layer-wise quantization error during calibration, allowing downstream layers to compensate for inherited error \cite{arai2025qep}. Chen et al. provide a complementary mechanistic analysis, showing that pretrained LLMs naturally exhibit partial error cancellation across blocks and LM-head geometry that attenuates some hidden-state perturbations \cite{chen2026why}. These findings support the view that quantization error is a network-level dynamic process.
+\subsection{Error Propagation and Reconstruction Objectives}
 
-In the literature reviewed through September 2026, we found substantial work on low-rank weight correction, activation reconstruction, residual preservation, calibration-time error propagation, and post-quantization parameter adaptation. We did not identify the same deployment formulation in which a frozen low-bit language model emits a hidden state and a compact sidecar predicts the unavailable full-precision hidden residual solely from that quantized state. We therefore position \gnrq{} as a complementary inference-time reconstruction mechanism rather than as a replacement for established PTQ methods.
+Quantization Error Propagation (QEP) models accumulation of layer-wise quantization error during calibration, allowing downstream layers to compensate for inherited error \cite{arai2025qep}. Chen et al.\ provide a complementary mechanistic analysis in which pretrained LLMs exhibit partial error cancellation across blocks and LM-head geometry attenuates some hidden-state perturbations \cite{chen2026why}. DynamicPTQ likewise analyzes residual-stream dynamics in aggressive activation quantization \cite{zhao2026dynamicptq}. These studies support a network-level view of quantization error rather than a collection of independent local perturbations.
+
+Very recent work also shows that the scale of reconstruction losses can produce uneven optimization across PTQ stages and that normalized alternatives can materially change optimization behavior \cite{li2026loss}. GNR-Q uses a normalized hidden-state objective in which corrected MSE is divided by the corresponding uncorrected quantized-to-teacher MSE. This normalization is part of the present experimental design rather than a claim that our objective is equivalent to the loss variants studied in that work.
+
+Among the literature reviewed through October 3, 2026, we found extensive work on weight-space error reconstruction, activation reconstruction, residual preservation, calibration-time error propagation, and post-quantization parameter adaptation. We did not identify the same deployment setting in which a frozen low-bit language model produces a hidden state and a compact sidecar predicts the unavailable full-precision hidden residual solely from that runtime state. We therefore position \gnrq{} as a complementary inference-time reconstruction mechanism.
 
 \section{Method}
 
@@ -148,7 +152,7 @@ and the predicted residual is
  \qquad
  W_{\mathrm{up}}\in\mathbb{R}^{d\times r}.
 \end{equation}
-The total trainable parameter count is approximately
+The total trainable parameter count is
 \begin{equation}
  N_R = d + 3dr.
 \end{equation}
@@ -182,11 +186,11 @@ An auxiliary task-aware variant additionally uses
  \qquad
  \lambda=0.25,
 \end{equation}
-but this variant is not used as the primary evidence for pure quantization-loss recovery.
+but this variant is not used as primary evidence for reconstruction-only quantization-loss recovery.
 
 \subsection{Diagnostic Intermediate-Layer Protocol}
 
-For mechanistic experiments we use differentiable simulated W4A16 and W3A16 quantization. Linear weights are group-wise quantized with symmetric round-to-nearest quantization using group size 128 and then dequantized into BF16 tensors. This reproduces quantization-induced numerical error while retaining differentiability; it does \emph{not} physically reduce model memory.
+For mechanistic experiments we use differentiable simulated W4A16 and W3A16 quantization. Linear weights are group-wise quantized with symmetric round-to-nearest quantization using group size 128 and then dequantized into BF16 tensors. This reproduces quantization-induced numerical error while retaining differentiability; it does not physically reduce model memory.
 
 For reconstruction at layer $l$, the quantized network is split into prefix and suffix:
 \begin{equation}
@@ -202,7 +206,7 @@ Training consists of local reconstruction followed by one optional frozen-suffix
 
 The deployment-oriented experiment uses TorchAO 0.18.0 weight-only INT4 quantization with group size 128, HQQ parameter selection, BF16 activations, and the \texttt{tile\_packed\_to\_4d} storage format. A total of 252 decoder \texttt{Linear} modules are converted to \texttt{Int4TilePackedTo4dTensor}.
 
-In our environment, the packed operation \texttt{aten::\_weight\_int4pack\_mm} supports forward inference but does not implement the activation-input derivative. We therefore treat the packed backbone as strictly frozen. Teacher and packed-student final hidden states are generated under no-gradient execution and detached. Reconstruction is then learned at the final hidden state immediately before the original frozen LM head:
+In our environment, the packed operation \texttt{aten::\_weight\_int4pack\_mm} supports forward inference but does not implement the activation-input derivative. We therefore treat the packed backbone as strictly frozen. Teacher and packed-student final hidden states are generated under no-gradient execution and detached. Reconstruction is learned at the final hidden state immediately before the original frozen LM head:
 \begin{equation}
  h_L^Q \rightarrow R_\theta(h_L^Q) \rightarrow \hat h_L \rightarrow W_{\mathrm{LM}}\hat h_L.
 \end{equation}
@@ -219,6 +223,64 @@ With bottleneck rank 192, its parameter count is
  N_{\mathrm{ctrl}} = d + 2d(192) = 985{,}600,
 \end{equation}
 exactly matching the rank-128 GNR-Q sidecar. Because RMSNorm is present, we refer to this baseline as a low-rank projection control rather than a strictly linear model.
+
+\subsection{State-Dependence Controls}
+
+The packed-model claim depends on more than the existence of a learnable average residual. We therefore add two controls using the same WikiText-2 training blocks.
+
+The \emph{mean-residual control} estimates a single global correction vector
+\begin{equation}
+ \bar e = \frac{1}{N}\sum_{i=1}^{N}
+ \left(h_i^{\mathrm{FP}}-h_i^Q\right),
+\end{equation}
+and applies
+\begin{equation}
+ \hat h_i = h_i^Q + \bar e
+\end{equation}
+to every validation state.
+
+The \emph{shuffled-residual control} retains the GNR-Q architecture but breaks the correct state--residual correspondence during training. For each minibatch, residual targets are randomly permuted across token states:
+\begin{equation}
+ h_i^Q \rightarrow e_{\pi(i)},
+ \qquad
+ \pi(i)\neq i \text{ in general}.
+\end{equation}
+This preserves the batch residual distribution while removing the intended token-level pairing. If most recovery can be obtained from global residual statistics alone, these controls should approach the correctly paired model. A substantial difference instead indicates additional information in the correspondence between the current quantized state and its own full-precision residual.
+
+\subsection{Cross-Corpus Transfer}
+
+The reconstructor is trained only on the 256 WikiText-2 training blocks used in the packed protocol. Without additional optimization, the resulting sidecar is evaluated on 64 fixed 128-token blocks drawn from the C4 validation stream \cite{raffel2020t5}. BF16, packed W4, and packed W4 plus the WikiText-trained reconstructor are evaluated on the same C4 blocks. This experiment tests whether the learned correction is confined to the training corpus or transfers to unseen text from a different corpus.
+
+\subsection{Residual Spectrum}
+
+To characterize the geometry of the correction, we collect 8,192 token states from WikiText-2 validation and analyze three centered matrices: the target quantization residual $E$, the predicted correction $\hat E$, and the unexplained residual $E-\hat E$. For eigenvalues $\lambda_1\geq\cdots\geq\lambda_d$ of the empirical feature covariance, cumulative spectral energy through rank $k$ is
+\begin{equation}
+ C_k =
+ \frac{\sum_{j=1}^{k}\lambda_j}
+ {\sum_{j=1}^{d}\lambda_j}.
+\end{equation}
+We additionally report entropy effective rank
+\begin{equation}
+ r_{\mathrm{ent}}
+ =
+ \exp\left(
+ -\sum_j p_j\log p_j
+ \right),
+ \qquad
+ p_j=\frac{\lambda_j}{\sum_m\lambda_m},
+\end{equation}
+and participation-ratio rank
+\begin{equation}
+ r_{\mathrm{PR}}
+ =
+ \frac{(\sum_j\lambda_j)^2}
+ {\sum_j\lambda_j^2}.
+\end{equation}
+Because the rank-128 GNR-Q up-projection constrains $\hat E$ to a subspace of dimension at most 128 before centering effects and numerical error, the predicted-correction spectrum is interpreted only as evidence about concentration \emph{within} the model's available correction subspace, not as an architecture-independent estimate of intrinsic residual rank.
+
+\subsection{Runtime Microbenchmark}
+
+Runtime is measured on the same NVIDIA GB10 system using batch size 1. Prefill uses 128-token inputs, 10 warm-up iterations, and 50 timed iterations. Autoregressive decode uses a 128-token prompt, KV caching, 128 generated steps per run, three warm-up runs, and ten timed runs. We report throughput for packed W4 and packed W4 plus the BF16 GNR-Q sidecar. These measurements are microbenchmarks rather than production-serving benchmarks.
 
 \subsection{Memory Accounting}
 
@@ -237,15 +299,17 @@ and relative memory reduction is
 
 All experiments use Qwen3-4B-Base \cite{yang2025qwen3}, checkpoint revision \texttt{906bfd4b4dc7f14ee4320094d8b41684\allowbreak abff8539}. Experiments run on a single NVIDIA DGX Spark equipped with an NVIDIA GB10 GPU (compute capability 12.1). The software environment is PyTorch 2.13.0+cu130, CUDA 13.0, Transformers 5.17.0, Datasets 5.0.1, TorchAO 0.18.0, and Python 3.12.3. All research dependencies are isolated in Docker containers.
 
-\subsection{Dataset}
+\subsection{Datasets}
 
-We use WikiText-2 \cite{merity2016pointer}. The training split is used for reconstruction training and the validation split for evaluation. Text is tokenized with the Qwen3 tokenizer and partitioned into fixed 128-token blocks. Primary runs use 256 training blocks and 64 validation blocks. Training uses batch size 4 and evaluation uses batch size 2. The calibration set therefore contains 32,768 training tokens. The present implementation concatenates each split before dividing it into blocks; the resulting tokenizer warning about the concatenated corpus length does not affect the actual 128-token model inputs.
+WikiText-2 \cite{merity2016pointer} is used for all reconstruction training and the primary validation experiments. Text is tokenized with the Qwen3 tokenizer and partitioned into fixed 128-token blocks. Primary runs use 256 training blocks and 64 validation blocks. Training uses batch size 4 and evaluation uses batch size 2. The calibration set therefore contains 32,768 training tokens. The implementation concatenates each WikiText split before dividing it into blocks; the resulting tokenizer warning about the concatenated corpus length does not affect the actual 128-token model inputs.
+
+C4 is used only for cross-corpus evaluation. We take the first 64 nonempty 128-token blocks accumulated from the English C4 validation stream, for 8,192 evaluation tokens. No C4 text is used to update the sidecar.
 
 \subsection{Optimization}
 
 For simulated experiments, both local reconstruction and frozen-suffix refinement use AdamW with weight decay 0.01 and gradient clipping to maximum global norm 1.0. Local reconstruction uses learning rate $3\times10^{-4}$, while frozen-suffix refinement uses $0.3$ times that rate, i.e., $9\times10^{-5}$ in the reported experiments. No learning-rate scheduler is used. Default simulated W4 uses layer 27, rank 128, three local epochs, one suffix-refinement epoch, and seed 42; because the script default is two local epochs, the released reproduction commands explicitly set \texttt{--local-epochs 3}.
 
-The packed experiment uses AdamW with the same learning rate and weight decay, gradient clipping at 1.0, four reconstruction epochs, rank 128, and seed 42.
+The packed experiment and the matched state-dependence run use AdamW with learning rate $3\times10^{-4}$, weight decay 0.01, gradient clipping at 1.0, four reconstruction epochs, rank 128, and seed 42. Fixed seeds control the scripted random number generators, although low-level GPU execution is not asserted to be bitwise deterministic.
 
 \subsection{Experimental Matrix}
 
@@ -262,10 +326,15 @@ Layer ablation & simulated W4A16 & 9, 18, 27 & 128 & 42 \\
 Rank ablation & simulated W4A16 & layer 27 & 32--256 & 42 \\
 Packed pure GNR-Q & actual INT4 & final state & 128 & 42 \\
 Low-rank control & actual INT4 & final state & 192 & 42 \\
+Matched GNR-Q rerun & actual INT4 & final state & 128 & 42 \\
+Mean-residual control & actual INT4 & final state & -- & -- \\
+Shuffled-residual control & actual INT4 & final state & 128 & 42 \\
+C4 transfer & actual INT4 & final state & 128 & 42 \\
+Spectrum / runtime & actual INT4 & final state & 128 & 42 \\
 Task-aware auxiliary & actual INT4 & final state & 128 & 42 \\
 \bottomrule
 \end{tabular}
-\caption{Experimental matrix. Simulated quantization is used for differentiable mechanistic analysis; actual packed INT4 is used for physical memory validation.}
+\caption{Experimental matrix. Simulated quantization is used for differentiable mechanistic analysis; packed INT4 is used for deployment-oriented validation and controls.}
 \label{tab:matrix}
 \end{table}
 
@@ -277,7 +346,7 @@ We report hidden-state MSE, hidden-state cosine similarity, next-token cross-ent
  =
  \frac{L_Q-L_R}{L_Q-L_{\mathrm{FP}}}\times 100,
 \end{equation}
-where $L_{\mathrm{FP}}$, $L_Q$, and $L_R$ denote BF16, quantized, and reconstructed validation loss, respectively.
+where $L_{\mathrm{FP}}$, $L_Q$, and $L_R$ denote BF16, quantized, and reconstructed validation loss, respectively. Spectral concentration is described using cumulative covariance energy and the two effective-rank measures defined above. Runtime is reported as tokens per second and milliseconds per decoded token.
 
 \section{Results}
 
@@ -302,7 +371,7 @@ Baseline & 0.69849 & 0.96823 & 2.76287 & 15.845 & 0.00\% \\
 \label{tab:w4seeds}
 \end{table}
 
-Mean final-hidden MSE reduction is approximately 26.23\%. The narrow seed-to-seed variation indicates that the effect is not driven by a single favorable initialization.
+Mean final-hidden MSE reduction is approximately 26.23\%. Seed-to-seed variation in gap closure is small relative to the recovered gap.
 
 \subsection{Severe W3 Quantization}
 
@@ -325,7 +394,7 @@ Baseline & 4.95136 & 0.79155 & 5.51381 & 248.094 & 0.00\% \\
 \label{tab:w3seeds}
 \end{table}
 
-Mean final-hidden MSE reduction is approximately 42.70\%, much larger than the downstream gap closure. This divergence suggests that not every component of geometric representation error is equally important for next-token prediction.
+Mean final-hidden MSE reduction is approximately 42.70\%, much larger than the downstream gap closure. Geometric reconstruction and task-relevant recovery therefore need not move in proportion.
 
 \subsection{Reconstruction Placement Matters}
 
@@ -345,7 +414,7 @@ Layer & Local MSE reduction & Final MSE & Final reduction & PPL & Gap closure \\
 \label{tab:layers}
 \end{table}
 
-Among the tested positions, layer 9 gives the strongest downstream recovery, although layer 18 gives slightly lower final hidden-state MSE. This shows that Euclidean representation similarity and task-relevant recovery are related but not interchangeable.
+Among the tested positions, layer 9 gives the strongest downstream recovery, although layer 18 gives slightly lower final hidden-state MSE. Euclidean representation similarity and task-relevant recovery are related but not interchangeable.
 
 \subsection{Capacity--Recovery Relationship}
 
@@ -366,11 +435,11 @@ Rank & Params & BF16 storage & Final MSE & PPL & Gap closure \\
 \label{tab:ranks}
 \end{table}
 
-Recovery improves steadily through rank 128 but largely saturates in downstream cross-entropy between ranks 128 and 256, even though hidden-state MSE continues to improve. Rank 128 therefore provides a favorable quality-to-sidecar-size operating point in this setup.
+Recovery improves steadily through rank 128 but largely saturates in downstream cross-entropy between ranks 128 and 256, even though hidden-state MSE continues to improve. Rank 128 is therefore used for the packed GNR-Q experiments.
 
 \subsection{Actual Packed W4 Memory and Quality}
 
-The central deployment experiment uses actual packed INT4 weights. Measured CUDA-allocated model memory falls from 7.545 GiB in BF16 to 2.792 GiB in packed W4, a 63.00\% reduction and 2.70$\times$ compression. The BF16 GNR-Q sidecar uses only 1.880 MiB, yielding a combined footprint of approximately 2.794 GiB and preserving approximately 62.97\% lower CUDA-allocated model memory than BF16.
+The central deployment experiment uses actual packed INT4 weights. Measured CUDA-allocated model memory falls from 7.545 GiB in BF16 to 2.792 GiB in packed W4, a 63.00\% reduction and 2.70$\times$ compression. The BF16 GNR-Q sidecar uses 1.880 MiB, yielding a combined footprint of approximately 2.794 GiB and preserving approximately 62.97\% lower CUDA-allocated model memory than BF16.
 
 \begin{table}[t]
 \centering
@@ -385,71 +454,149 @@ W4 + GNR-Q & $\sim$2.794 GiB & 1.88 MiB & 2.66825 & 14.415 & 0.39009 & 27.52\% \
 W4 + low-rank control & $\sim$2.794 GiB & 1.88 MiB & 2.66972 & 14.436 & 0.39953 & 26.51\% \\
 \bottomrule
 \end{tabular}
-\caption{Main packed W4 results. The principal GNR-Q model is trained only on hidden-state reconstruction, with no next-token loss.}
+\caption{Primary packed W4 results. The principal GNR-Q model is trained only on hidden-state reconstruction, with no next-token loss.}
 \label{tab:packed}
 \end{table}
 
-Pure representation reconstruction reduces hidden-state MSE by approximately 27.44\% and closes 27.52\% of the cross-entropy gap. Because no next-token objective is used, the downstream improvement arises as a consequence of moving the quantized hidden state toward its BF16 counterpart.
+Pure representation reconstruction reduces hidden-state MSE by approximately 27.44\% and closes 27.52\% of the cross-entropy gap. Because no next-token objective is used, the language-model improvement follows from moving the quantized final representation toward its BF16 counterpart.
 
-The low-rank projection control closes 26.51\% of the gap with the same parameter count and storage. The nonlinear GNR-Q architecture is consistently better, but the small difference indicates that much of the recoverable residual can be represented by a compact state-conditioned low-rank mapping.
+The parameter-matched low-rank projection control closes 26.51\% of the gap with the same parameter count and storage. The small difference between the two architectures argues against treating nonlinear gating as the main source of the effect.
+
+\subsection{Correct State--Residual Pairing Adds Recovery Beyond Global Correction}
+
+A separate matched packed-W4 run reproduces the GNR-Q effect at 27.92\% CE-gap closure. This run is used for the state-dependence controls so that all compared conditions share the same packed backbone and evaluation protocol.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Condition & Loss & PPL & Hidden MSE & Gap closure \\
+\midrule
+BF16 & 2.56338 & 12.980 & -- & -- \\
+Packed W4 & 2.70808 & 15.000 & 0.53760 & 0.00\% \\
+Mean residual & 2.68484 & 14.656 & 0.47255 & 16.06\% \\
+Shuffled residual & 2.68678 & 14.684 & 0.47240 & 14.72\% \\
+Correctly paired GNR-Q & 2.66768 & 14.407 & 0.38863 & 27.92\% \\
+\bottomrule
+\end{tabular}
+\caption{Matched packed-W4 state-dependence controls. The mean-residual correction is state independent. The shuffled-residual model preserves the residual marginal distribution during training while breaking the intended state--residual pairing.}
+\label{tab:statecontrols}
+\end{table}
+
+The mean correction reduces hidden-state MSE by 12.10\%, and shuffled training reduces it by 12.13\%. Correct pairing reduces MSE by 27.71\%. In CE-gap terms, correct pairing exceeds the mean control by 11.86 percentage points and the shuffled control by 13.20 percentage points. The controls therefore identify two components of the observed gain: a state-independent component that can be captured from aggregate residual statistics, and an additional component that depends on the correspondence between $h^Q$ and its own residual.
+
+This comparison does not establish that the learned function equals the conditional expectation $\mathbb{E}[e\mid h^Q]$, nor does it exclude every possible distributional cue available to the sidecar. It does show that preserving the intended state--residual mapping materially increases reconstruction beyond what is obtained when that mapping is removed.
+
+\subsection{The WikiText-Trained Sidecar Transfers to C4}
+
+The correctly paired GNR-Q sidecar trained on WikiText-2 is applied to C4 without retraining.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+C4 condition & Loss & PPL & Hidden MSE & Gap closure \\
+\midrule
+BF16 & 3.15675 & 23.494 & -- & -- \\
+Packed W4 & 3.24364 & 25.627 & 0.29456 & 0.00\% \\
+W4 + WikiText-trained GNR-Q & 3.21265 & 24.845 & 0.16702 & 35.67\% \\
+\bottomrule
+\end{tabular}
+\caption{Cross-corpus evaluation on 8,192 C4 validation tokens. The sidecar receives no C4 training or adaptation.}
+\label{tab:c4}
+\end{table}
+
+On C4, hidden-state MSE falls by 43.30\%, while 35.67\% of the quantization-induced CE gap is recovered. The absolute CE improvement is 0.03099, compared with 0.04040 in the matched WikiText run; the larger C4 percentage therefore reflects a smaller initial C4 quantization gap rather than a claim that C4 is intrinsically easier to reconstruct. The important result is transfer without corpus-specific retraining.
+
+\subsection{The Reconstructed Component Is Spectrally Concentrated}
+
+Table~\ref{tab:spectrum} compares covariance spectra of the target residual, predicted correction, and residual remaining after correction.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Matrix & Top-8 & Top-32 & Top-128 & $r_{\mathrm{ent}}$ & $r_{\mathrm{PR}}$ \\
+\midrule
+Target residual & 28.41\% & 38.64\% & 52.79\% & 453.39 & 45.57 \\
+Predicted correction & 87.76\% & 99.50\% & 100.00\% & 7.22 & 3.59 \\
+Unexplained residual & 17.81\% & 27.43\% & 43.17\% & 777.81 & 128.98 \\
+\bottomrule
+\end{tabular}
+\caption{Spectral concentration over 8,192 WikiText-2 validation token states. Percentages are cumulative covariance energy. The predicted correction is constrained by the rank-128 architecture, so its absolute rank is not interpreted as an architecture-independent intrinsic-rank estimate.}
+\label{tab:spectrum}
+\end{table}
+
+The target residual already exhibits substantial concentration: 52.79\% of its covariance energy lies in the leading 128 directions. The learned correction is considerably more concentrated within its available subspace, with 87.76\% of energy in the leading 8 directions and 95.78\% in the leading 16. After correction, the remaining residual becomes less concentrated than the original target residual under both effective-rank measures. The result is consistent with GNR-Q preferentially capturing a structured component while leaving a more diffuse remainder.
+
+The rank-128 architecture necessarily limits the span available to the predicted correction. The spectral result therefore supports concentration of the \emph{captured} component; it is not evidence that the total quantization residual has intrinsic rank 128 or less.
+
+\subsection{Runtime Overhead Is Below the Resolution of the Batch-1 Microbenchmark}
+
+In the idle batch-1 rerun, 128-token prefill throughput is 861.46 tokens/s for packed W4 and 861.47 tokens/s for packed W4 plus GNR-Q. Cached autoregressive decode is 47.39 tokens/s for packed W4 and 47.44 tokens/s with GNR-Q, corresponding to 21.102 and 21.077 ms/token, respectively.
+
+The corrected path is nominally 0.12\% faster in this run. We do not interpret this as a speed improvement; the sign and magnitude indicate that sidecar overhead is below the measurement resolution of this microbenchmark. The result is limited to batch size 1, sequence length 128, and the tested final-state sidecar on a GB10 GPU.
 
 \subsection{Task-Aware Auxiliary Variant}
 
-When a next-token objective is added with $\lambda=0.25$, the packed model reaches loss 2.48053 and perplexity 11.948, lower than the BF16 reference. This result is not interpreted as 157\% quantization-loss recovery: the sidecar is now directly optimized for language modeling and can move away from the BF16 representation if that improves the corpus-specific objective. We therefore treat this experiment as evidence that the same sidecar can also act as a tiny adaptation module, not as part of the primary reconstruction claim.
+When a next-token objective is added with $\lambda=0.25$, the packed model reaches loss 2.48053 and perplexity 11.948, lower than the BF16 reference. This result is not interpreted as 157\% quantization-loss recovery: the sidecar is directly optimized for language modeling and can move away from the BF16 representation when doing so improves the corpus-specific objective. We therefore treat this experiment as evidence that the same small sidecar can also serve as an adaptation module, not as part of the primary reconstruction claim.
 
 \section{Discussion}
 
-\subsection{Quantization Error Contains a Predictable Component}
+\subsection{The Recoverable Error Has Both Global and State-Dependent Components}
 
-The central result is incompatible with a model in which quantization error is entirely independent, state-unrelated noise. If
+The packed-model result is inconsistent with the strongest null model in which quantization error is entirely state-unrelated noise. The new controls refine that statement. A fixed mean residual alone recovers 16.06\% of the CE gap, showing that a nontrivial portion of quantization damage is shared across states. A GNR-Q model trained after shuffling residual targets performs similarly, recovering 14.72\%. Correct state--residual pairing raises recovery to 27.92\%.
+
+A useful descriptive decomposition is
 \begin{equation}
- e = h^{\mathrm{FP}}-h^Q
+ e = \mu_e + e_{\mathrm{state}} + e_{\mathrm{rem}},
 \end{equation}
-were conditionally unpredictable from $h^Q$, a compact predictor would provide little benefit. Instead, the observed packed-model recovery implies that a meaningful component of the residual behaves as a statistically predictable function of the surviving representation.
+where $\mu_e$ denotes a state-independent component, $e_{\mathrm{state}}$ denotes residual structure predictable from the current state, and $e_{\mathrm{rem}}$ denotes what remains unexplained under the present model and data. This is not an identified causal or orthogonal decomposition. It organizes the empirical comparison: aggregate residual statistics explain part of the recovery, while correct state conditioning explains additional recovery that disappears when correspondence is broken.
 
-A useful decomposition is
+Under squared-error prediction, the optimal deterministic predictor is the conditional expectation
 \begin{equation}
- e = e_{\mathrm{pred}} + e_{\mathrm{irr}},
+ R^*(h^Q)=\mathbb{E}[e\mid h^Q].
 \end{equation}
-where the optimal deterministic squared-error predictor targets
-\begin{equation}
- e_{\mathrm{pred}}
- \approx
- \mathbb{E}[e\mid h^Q].
-\end{equation}
-This is a conditional-estimation claim, not an exact inversion claim. Quantization can irreversibly collapse multiple full-precision values into the same low-bit representation. \gnrq{} does not recover discarded bits; it estimates a useful counterfactual full-precision state from statistical structure learned offline.
+GNR-Q is best viewed as a small parametric approximation to such a conditional predictor, not as an inverter of quantization. Multiple full-precision states can collapse to the same low-bit representation, so exact recovery is neither expected nor required by the formulation.
 
-\subsection{Compact Structure Dominates Architectural Complexity}
+\subsection{Compactness Is a Property of the Captured Component, Not a Claim of Architectural Novelty}
 
-The parameter-matched low-rank control recovers nearly the same cross-entropy gap as the nonlinear sidecar. This suggests that the primary phenomenon is not the expressive power of a large nonlinear network. Instead, much of the predictable residual appears accessible through a compact low-rank state-conditioned mapping. The current experiment does not directly prove that residual covariance is low rank; spectral analysis would be required for that stronger claim. We therefore describe the result as evidence for \emph{compact} or \emph{low-dimensional} predictable structure rather than as a measured intrinsic-rank theorem.
+The parameter-matched low-rank control recovers 26.51\% of the original packed-model CE gap, close to the 27.52\% recovered by the gated GNR-Q sidecar. This result is useful precisely because it weakens an architecture-centric interpretation. The central phenomenon does not depend on showing that the gated sidecar is superior to a conventional low-rank projection.
 
-The more important distinction is state conditioning. Even the low-rank control produces
-\begin{equation}
- \hat e_t = W_2W_1\operatorname{RMSNorm}(h_t^Q),
-\end{equation}
-so different runtime states receive different corrections. This differs conceptually from storing a fixed weight-space residual.
+The spectral analysis gives a more direct view of structure. The target residual has nonuniform covariance energy, with 28.41\% in its leading eight directions and 52.79\% in its leading 128. GNR-Q's predicted correction is much more concentrated, while the residual left after correction has higher effective rank and lower leading-direction concentration. Because the sidecar itself contains a rank-128 bottleneck, the predicted correction cannot be used to estimate an unconstrained intrinsic rank. What the experiment shows is narrower: within a constrained correction budget, the component that GNR-Q successfully captures is concentrated enough to account for a meaningful fraction of both hidden-state and CE degradation.
+
+This distinction matters for positioning. GNR-Q is not proposed as a novel adapter topology. Its contribution is the use of a compact runtime function to estimate a counterfactual full-precision hidden-state residual from the quantized state.
+
+\subsection{Cross-Corpus Transfer Weakens a Corpus-Memorization Explanation}
+
+The sidecar is calibrated on only 32,768 WikiText-2 training tokens, yet it recovers 35.67\% of the quantization-induced CE gap on 8,192 unseen C4 validation tokens without retraining. This does not establish broad domain generalization: one model, one transfer corpus, and a small evaluation sample are insufficient for that claim. It does make a purely WikiText-specific adaptation explanation less plausible for the packed-model effect.
+
+The distinction is especially relevant because the primary sidecar receives no next-token labels. Its training signal is the correspondence between quantized and BF16 representations. Transfer to C4 is therefore consistent with the learned mapping capturing quantization-related representation structure that is not confined to the lexical distribution of the calibration corpus.
 
 \subsection{Quantization Error Is Part of a Dynamic Trajectory}
 
-Layer placement substantially changes cross-entropy recovery. The strongest tested result occurs at layer 9, not at the latest tested intermediate layer. At the same time, final MSE values across layers are similar. A correction therefore matters not only because of how much error it removes locally, but also because of how it changes the subsequent transformer trajectory. This interpretation is consistent with recent evidence that inherited and newly introduced quantization errors interact structurally across pretrained transformer blocks \cite{chen2026why}.
+Layer placement substantially changes cross-entropy recovery. The strongest tested simulated result occurs at layer 9, not at the latest intermediate layer. At the same time, final MSE values across layers are similar. A correction matters not only because of how much error it removes at the insertion point, but also because of how it changes the subsequent transformer trajectory. This interpretation is compatible with recent evidence that inherited and newly introduced quantization errors interact structurally across transformer blocks \cite{chen2026why}.
 
-We do not conclude that earlier correction is universally better. Very early states may not yet contain sufficient accumulated error, whereas very late states may leave too little downstream computation for corrections to affect task-relevant geometry. Reconstruction placement should instead be treated as an optimization variable.
+We do not conclude that earlier correction is universally better. Very early states may not yet contain sufficient accumulated error, whereas very late states leave little downstream computation through which a correction can alter task-relevant geometry. Reconstruction placement remains an optimization variable.
 
 \subsection{Representation Fidelity and Task Fidelity Are Not Identical}
 
-Several results reveal a consistent distinction between geometric and functional reconstruction. Under W3, MSE recovery is much larger than cross-entropy recovery. Increasing rank from 128 to 256 improves MSE but barely improves cross-entropy. Layer 18 yields slightly better final MSE than layer 9 but worse language-model loss. Finally, the task-aware sidecar produces better-than-BF16 corpus loss despite having higher MSE than the pure reconstruction model.
+Several results separate geometric from functional reconstruction. Under simulated W3, MSE recovery is much larger than CE recovery. Increasing rank from 128 to 256 improves MSE but barely improves CE. Layer 18 yields slightly better final MSE than layer 9 but worse language-model loss. The task-aware sidecar can even produce better-than-BF16 corpus loss while no longer serving as a pure estimator of the BF16 representation.
 
-These observations suggest that hidden-state error contains directions with very different functional importance. A future objective may therefore weight residual directions according to downstream sensitivity rather than optimizing unweighted MSE alone.
+Hidden-state error therefore contains directions with different functional importance. A natural extension is to weight reconstruction directions by downstream sensitivity rather than treating every hidden dimension equally.
 
-\subsection{A Practical Memory--Compute Trade-Off}
+\subsection{Memory Savings Are Demonstrated; Runtime Cost Is Small in the Tested Regime}
 
-Packed W4 removes approximately 4.753 GiB of measured CUDA-allocated model memory relative to BF16, while the deployed sidecar reintroduces only 1.880 MiB. The saved-memory-to-sidecar-storage ratio is therefore approximately 2,589:1. This makes the parameter-memory side of the trade-off strongly favorable.
+Packed W4 removes approximately 4.753 GiB of measured CUDA-allocated model memory relative to BF16, while the deployed sidecar reintroduces only 1.880 MiB. The saved-memory-to-sidecar-storage ratio is approximately 2,589:1. On the tested batch-1 microbenchmark, adding the sidecar produces no resolvable prefill or decode slowdown: measured throughput is effectively unchanged at 128-token prefill and cached single-token decode.
 
-However, memory is only one deployment resource. The present study does not measure end-to-end latency, decoding throughput, prefill throughput, or energy. Approximately one million additional low-rank multiply-accumulate operations per token is small relative to a 4B-parameter backbone, but kernel-launch and memory-movement overhead can dominate small modules. We therefore claim a demonstrated memory--additional-compute design space, not yet a proven latency advantage.
+The runtime result should not be generalized beyond this regime. Batch size, context length, serving engine, kernel fusion, placement of the sidecar, and concurrent requests can all change the relative cost of a small module. Energy was not measured. The demonstrated result is therefore a favorable memory trade with negligible measured overhead in the specific final-state batch-1 configuration, not a universal latency claim.
 
 \subsection{Relationship to Neural Reconstruction in Graphics}
 
-The original motivation came from the general computational strategy behind modern neural reconstruction systems: represent or compute a lower-cost intermediate state, then infer some missing high-fidelity detail only when needed. The analogy should not be taken as architectural equivalence to DLSS. Graphics reconstruction may use spatial, temporal, motion, or other guidance signals; the current GNR-Q prototype uses only the present quantized hidden state. The transferable principle is narrower: some fidelity that would otherwise require more explicit representation can potentially be replaced by learned runtime computation.
+The original motivation came from the general computational strategy behind neural reconstruction systems: compute or store a lower-cost intermediate representation and infer some missing high-fidelity detail only when needed. The analogy should not be taken as architectural equivalence to DLSS. Graphics reconstruction may use spatial, temporal, motion, or other guidance signals; the current GNR-Q prototype uses only the present quantized hidden state. The transferable principle is narrower: some fidelity that would otherwise require more explicit representation may be replaced by learned runtime computation.
 
 A more explicitly guided future version could condition on quantization scales, activation RMS, outlier indicators, layer identity, attention statistics, uncertainty estimates, or previous reconstruction states:
 \begin{equation}
@@ -458,54 +605,56 @@ A more explicitly guided future version could condition on quantization scales, 
 
 \section{Limitations and Future Work}
 
-This work is an initial proof of concept and has several important limitations.
+This work is an initial proof of concept and retains several important limitations.
 
-\paragraph{Single model family and dataset.}
-All experiments use Qwen3-4B-Base and WikiText-2. Although training and validation splits are separate, both come from the same corpus family. Replication across other model families, scales, domains, and multilingual or code datasets is necessary before making universality claims.
+\paragraph{Single model family.}
+All experiments use Qwen3-4B-Base. Cross-corpus transfer from WikiText-2 to C4 shows that the effect is not confined to the original validation corpus, but it does not establish transfer across architectures, model scales, languages, code distributions, or instruction-tuned models. Replication across model families is the most important next generalization test.
 
-\paragraph{Small calibration set.}
-The sidecar is trained using only 32,768 tokens, but calibration-size scaling is not characterized. Future work should measure reconstruction quality as a function of calibration data volume.
+\paragraph{Small calibration and evaluation sets.}
+The sidecar is trained on 32,768 tokens. The C4 transfer experiment uses 8,192 evaluation tokens. Calibration-size scaling and larger held-out evaluations remain uncharacterized.
 
 \paragraph{Packed evaluation is W4 only.}
-Simulated W3 results are mechanistic and do not demonstrate real W3 memory compression. Practical packed 3-bit kernels would enable evaluation of whether more aggressive compression plus reconstruction provides a superior memory--quality operating point.
+Simulated W3 results are mechanistic and do not demonstrate real W3 memory compression. Practical packed 3-bit kernels would permit a direct test of whether more aggressive compression plus reconstruction improves the memory--quality frontier.
 
 \paragraph{Packed-kernel backward limitation.}
 The evaluated TorchAO packed INT4 kernel does not provide the activation-input derivative, so actual packed intermediate-layer end-to-end refinement is not tested. Future kernels, local intermediate-state training, or differentiable surrogate-to-packed transfer could close this gap.
 
-\paragraph{No matched comparison against state-of-the-art static correction.}
-We do not claim superiority over QERA, LQER, ASER, GlowQ, BALANCER, or related methods. A key future experiment is a matched-budget comparison among static low-rank correction, state-conditioned reconstruction, and hybrid static--dynamic correction.
+\paragraph{No matched state-of-the-art static-correction benchmark.}
+We do not claim superiority over QERA, LQER, ASER, GlowQ, BALANCER, SRR, or related methods. The low-rank control tests architectural dependence at equal parameter count, not overall competitiveness against independently optimized PTQ systems. A matched-budget comparison among static weight-space correction, state-conditioned reconstruction, and hybrid static--dynamic correction remains necessary.
 
-\paragraph{Compact structure is inferred, not directly measured.}
-The low-rank control suggests a compact predictable residual, but we do not compute the singular-value spectrum or intrinsic dimensionality of residual matrices. Spectral analysis is needed to distinguish total residual rank, predictable residual rank, and task-relevant residual rank.
+\paragraph{Spectral analysis is architecture constrained.}
+The target and unexplained residual spectra are measured directly, but the predicted correction is produced by a rank-128 bottleneck. Its concentration therefore cannot be interpreted as an architecture-independent estimate of the intrinsic dimension of the recoverable residual. Unconstrained conditional predictors or rank-varying spectral studies would provide a stronger test.
 
 \paragraph{Limited layer and rank sweeps.}
-Only three intermediate layers and four ranks are evaluated. Denser sweeps and sparse multi-layer reconstruction may provide better recovery per unit of additional computation.
+Only three intermediate layers and four ranks are evaluated. Denser placement sweeps, multiple simultaneous reconstruction sites, and allocation of a fixed sidecar budget across layers may yield better recovery.
 
-\paragraph{No latency, throughput, or energy benchmark.}
-Measured memory savings are real within the PyTorch CUDA allocation framework, but production efficiency requires end-to-end serving measurements, including prefill, autoregressive decode, batching, and power consumption.
+\paragraph{Runtime evaluation is a microbenchmark.}
+We measure batch-1 prefill and cached decode on a single GB10 system. We do not benchmark batching, long-context serving, concurrent requests, alternative inference engines, energy, or production end-to-end latency.
 
 \paragraph{Short context and weight-only quantization.}
 All experiments use sequence length 128 and weight-only quantization with BF16 activations. Long-context behavior, joint weight--activation quantization, and KV-cache quantization remain open questions.
 
 \paragraph{Statistical replication.}
-Primary simulated W3/W4 results use three seeds. The low variability is encouraging, but stronger statistical inference should come from more seeds and, more importantly, replication across architectures and datasets.
+Primary simulated W3/W4 experiments use three seeds, while the packed controls use a single scripted seed plus a matched repeat of the principal packed result. Stronger statistical inference should come primarily from replication across architectures, datasets, and packed-kernel implementations rather than from seed replication alone.
 
-Future work should formulate compression and reconstruction jointly. Given bit width $b$, sidecar rank $r$, and reconstruction locations $\mathcal{S}$, deployment could be optimized as
+Future work can formulate compression and reconstruction jointly. Given bit width $b$, sidecar rank $r$, and reconstruction locations $\mathcal{S}$, deployment can be written as
 \begin{equation}
  \min_{b,r,\mathcal{S}} \mathcal{L}_{\mathrm{deploy}}
 \end{equation}
-subject to memory and reconstruction-compute budgets. Such a formulation treats quantization not as a one-way removal of precision but as one component of a broader resource-allocation problem.
+subject to memory, latency, and reconstruction-compute budgets. In this formulation, quantization and reconstruction are two allocations of the same deployment resource problem rather than separate stages.
 
 \section{Conclusion}
 
-We investigated whether representation quality lost through low-bit language-model quantization can be partially reconstructed at inference time rather than preserved entirely as stored numerical precision. GNR-Q uses a compact state-conditioned sidecar to estimate a residual toward the corresponding full-precision hidden state while leaving the quantized backbone frozen.
+We tested whether representation fidelity lost through low-bit language-model quantization can be partially reconstructed at inference time from the quantized model's own hidden state. GNR-Q uses a compact state-conditioned sidecar trained against an offline full-precision teacher while leaving the deployed low-bit backbone frozen.
 
-Across simulated W4 and W3 experiments, reconstruction consistently reduces representation error and improves language-model quality. In an actual packed INT4 Qwen3-4B-Base model, CUDA-allocated model memory falls from 7.545 GiB to 2.792 GiB. A 1.88 MiB BF16 sidecar trained only on hidden-state reconstruction reduces final hidden-state MSE by 27.44\% and recovers 27.52\% of the quantization-induced cross-entropy degradation. A parameter-matched low-rank projection control recovers 26.51\%, suggesting that much of the recoverable residual has compact state-dependent structure.
+In the primary packed INT4 Qwen3-4B-Base experiment, measured CUDA-allocated model memory falls from 7.545 GiB to 2.792 GiB. A 1.88 MiB BF16 sidecar trained only on hidden-state reconstruction reduces final hidden-state MSE by 27.44\% and recovers 27.52\% of the quantization-induced CE gap. A parameter-matched low-rank projection reaches 26.51\%, indicating that architectural complexity is not the main contribution. A separate matched run recovers 27.92\%; replacing the learned state-dependent mapping with a global mean residual or breaking state--residual correspondence reduces recovery to 16.06\% and 14.72\%. The WikiText-trained sidecar also transfers without retraining to C4, where it recovers 35.67\% of the quantization-induced CE gap.
 
-The strongest conclusion supported by the present experiments is deliberately narrow: a substantial component of quantization-induced representation degradation is statistically predictable from the surviving quantized hidden state and can be reconstructed by a very small learned sidecar while preserving nearly all of the memory savings of low-bit inference. This establishes a complementary design axis for quantized language models in which stored precision and runtime reconstruction capacity can be allocated jointly.
+Spectral analysis adds a geometric interpretation: the target residual is nonuniform, the learned correction is strongly concentrated within the sidecar's constrained subspace, and the unexplained remainder is more diffuse. Batch-1 prefill and decode microbenchmarks show no resolvable throughput penalty in the tested final-state configuration.
+
+The strongest conclusion is therefore specific. Low-bit quantization leaves a representation from which a small learned function can predict a useful component of the corresponding full-precision residual. That component is not explained entirely by a global average correction, survives transfer to a different text corpus, and can be reconstructed while retaining essentially all of the packed model's memory savings. This establishes state-conditioned runtime reconstruction as a distinct design axis for quantized language-model deployment.
 
 \paragraph{Code availability.}
-The code, experiment launchers, machine-readable results, and arXiv source bundle are released at \url{https://github.com/undeturmoil/GNR-Q}.
+Code, experiment launchers, machine-readable results, and manuscript source are released at \url{https://github.com/undeturmoil/GNR-Q}.
 
 \begin{thebibliography}{99}
 
@@ -579,6 +728,26 @@ S. Fan and Y. Lao.
 \newblock Budget-aware LLM quantization and low-rank correction via information-guided subspace matrices.
 \newblock In \emph{Proceedings of the Thirty-Fifth International Joint Conference on Artificial Intelligence}, pages 4269--4277, 2026. doi:10.24963/ijcai.2026/475.
 
+\bibitem{cho2026srr}
+Y. Cho, D. Jeon, S. Kim, M. Jeon, and A. No.
+\newblock Preserve-Then-Quantize: Balancing rank budgets for quantization error reconstruction in LLMs.
+\newblock In \emph{Proceedings of the 43rd International Conference on Machine Learning}, PMLR 306:19765--19786, 2026.
+
+\bibitem{liu2026awsrc}
+Z. Liu, C. Fang, and Y. Ren.
+\newblock Activation-weighted seeded residual coding for low-bit LLM weight repair.
+\newblock \emph{arXiv:2608.23144}, 2026.
+
+\bibitem{zhao2026dynamicptq}
+Z. Zhao et al.
+\newblock DynamicPTQ: Mitigating activation quantization collapse via residual-stream dynamics.
+\newblock \emph{arXiv:2606.12487}, 2026.
+
+\bibitem{li2026loss}
+C. Li, S. Wang, and A. Yao.
+\newblock The devil is in the reconstruction loss scale: Rethinking optimization in LLM quantization.
+\newblock \emph{arXiv:2610.00983}, 2026.
+
 \bibitem{yang2025qwen3}
 A. Yang et al.
 \newblock Qwen3 technical report.
@@ -589,9 +758,15 @@ S. Merity, C. Xiong, J. Bradbury, and R. Socher.
 \newblock Pointer sentinel mixture models.
 \newblock \emph{arXiv:1609.07843}, 2016.
 
+\bibitem{raffel2020t5}
+C. Raffel, N. Shazeer, A. Roberts, K. Lee, S. Narang, M. Matena, Y. Zhou, W. Li, and P. J. Liu.
+\newblock Exploring the limits of transfer learning with a unified text-to-text transformer.
+\newblock \emph{Journal of Machine Learning Research}, 21(140):1--67, 2020.
+
 \end{thebibliography}
 
 \appendix
+
 \section{Auxiliary Task-Aware Result}
 
 For completeness, when the packed rank-128 sidecar is trained using
@@ -600,8 +775,17 @@ For completeness, when the packed rank-128 sidecar is trained using
 \end{equation}
 validation loss falls from the packed baseline 2.70808 to 2.48053, with perplexity 11.948. This is lower than the BF16 validation loss 2.56338. We do not interpret the corresponding nominal gap closure above 100\% as quantization-loss recovery because next-token supervision permits corpus-specific adaptation beyond reconstruction of the BF16 state.
 
+\section{Final Validation Details}
+
+The matched packed-W4 validation run uses the same Qwen3-4B-Base checkpoint, TorchAO packing configuration, 256 WikiText-2 training blocks, 64 WikiText-2 validation blocks, rank 128, four reconstruction epochs, and seed 42 as the principal packed protocol. It additionally evaluates a global mean-residual control, shuffled residual targets, C4 transfer, covariance spectra from 8,192 validation states, and batch-1 runtime.
+
+The corresponding machine-readable output is stored as
+\begin{quote}
+\texttt{results/raw/v5\_final\_validation\_final.json}.
+\end{quote}
+
 \section{Reproducibility Notes}
 
-The public repository accompanying this manuscript is intended to include the Dockerfiles, simulated and packed experiment scripts, shell commands for seed/layer/rank ablations, machine-readable JSON result files, and a source bundle matching the arXiv manuscript. Model weights and the WikiText-2 corpus are not redistributed; the scripts retrieve them from their original public sources.
+The public repository accompanying this manuscript includes Docker configuration, simulated and packed experiment scripts, shell commands for seed/layer/rank ablations, final validation code, and machine-readable JSON results. Model weights, WikiText-2, and C4 are not redistributed; the scripts retrieve them from their public sources. The final validation launcher is \texttt{run\_gnrq\_v5\_final.sh}, and the validation implementation is \texttt{src/gnrq\_v5\_final\_validation.py}.
 
 \end{document}
